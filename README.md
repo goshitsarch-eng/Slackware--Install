@@ -23,13 +23,13 @@ A dead-simple, fully automated Slackware installer. Boot the install media, run 
 Boot the Slackware install media, then:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/gosh-slack-installer/main/gosh-slack-installer.sh | bash
+curl -fsSL https://raw.githubusercontent.com/goshitsarch-eng/gosh-slack-installer/main/gosh-slack-installer.sh | bash
 ```
 
 Or if you want to inspect before running:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/YOUR_USERNAME/gosh-slack-installer/main/gosh-slack-installer.sh
+curl -fsSLO https://raw.githubusercontent.com/goshitsarch-eng/gosh-slack-installer/main/gosh-slack-installer.sh
 less gosh-slack-installer.sh
 bash gosh-slack-installer.sh
 ```
