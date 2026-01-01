@@ -15,6 +15,19 @@ ROOT_PASS="changeme"
 SLACK_SOURCE="/mnt/cdrom/slackware64"
 
 #=============================================================================
+# BOOT MODE DETECTION
+#=============================================================================
+detect_boot_mode() {
+    if [[ -d /sys/firmware/efi ]]; then
+        echo "uefi"
+    else
+        echo "bios"
+    fi
+}
+
+BOOT_MODE=$(detect_boot_mode)
+
+#=============================================================================
 # AUTO-DETECT TARGET DISK
 # Finds the largest non-removable disk that isn't the install media
 #=============================================================================
@@ -23,7 +36,7 @@ detect_target_disk() {
     
     # Find which disk holds our install source
     if [[ -d "$SLACK_SOURCE" ]]; then
-        install_disk=$(df "$SLACK_SOURCE" 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//' | xargs basename 2>/dev/null || true)
+        install_disk=$(df "$SLACK_SOURCE" 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/p\?[0-9]*$//' | xargs basename 2>/dev/null || true)
     fi
     
     # Find largest non-removable disk, excluding install media
@@ -32,18 +45,49 @@ detect_target_disk() {
         sort -rn | head -1 | awk '{print "/dev/" $2}'
 }
 
+#=============================================================================
+# PARTITION NAMING HELPER
+# Handles NVMe (/dev/nvme0n1p1) vs SATA/virtio (/dev/sda1) naming
+#=============================================================================
+get_partition_path() {
+    local disk="$1"
+    local num="$2"
+    
+    # NVMe and certain other devices use 'p' separator
+    if [[ "$disk" =~ nvme[0-9]+n[0-9]+$ ]] || \
+       [[ "$disk" =~ mmcblk[0-9]+$ ]] || \
+       [[ "$disk" =~ loop[0-9]+$ ]] || \
+       [[ "$disk" =~ nbd[0-9]+$ ]]; then
+        echo "${disk}p${num}"
+    else
+        echo "${disk}${num}"
+    fi
+}
+
+#=============================================================================
+# DETECT AND VALIDATE
+#=============================================================================
 TARGET_DISK=$(detect_target_disk)
 
 if [[ -z "$TARGET_DISK" ]] || [[ ! -b "$TARGET_DISK" ]]; then
     echo "Error: Could not auto-detect a suitable target disk" >&2
+    echo "Available disks:" >&2
+    lsblk -dno NAME,SIZE,TYPE,RM | grep -E "disk\s+0$" >&2
     exit 1
 fi
 
 #=============================================================================
-# DERIVED PATHS
+# DERIVED PATHS (using partition helper)
 #=============================================================================
-PART_ROOT="${TARGET_DISK}1"
-PART_SWAP="${TARGET_DISK}2"
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    PART_EFI=$(get_partition_path "$TARGET_DISK" 1)
+    PART_ROOT=$(get_partition_path "$TARGET_DISK" 2)
+    PART_SWAP=$(get_partition_path "$TARGET_DISK" 3)
+else
+    PART_ROOT=$(get_partition_path "$TARGET_DISK" 1)
+    PART_SWAP=$(get_partition_path "$TARGET_DISK" 2)
+fi
+
 TARGET="/mnt/target"
 
 #=============================================================================
@@ -72,17 +116,30 @@ SWAP_GB=$RAM_GB
 # DISK SIZE CHECK
 #=============================================================================
 DISK_SIZE_GB=$(( $(blockdev --getsize64 "$TARGET_DISK") / 1073741824 ))
-MIN_SIZE=$(( SWAP_GB + 4 ))
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    MIN_SIZE=$(( SWAP_GB + 5 ))  # Extra for EFI partition
+else
+    MIN_SIZE=$(( SWAP_GB + 4 ))
+fi
 
 if [[ $DISK_SIZE_GB -lt $MIN_SIZE ]]; then
     echo "Error: Disk too small. Need at least ${MIN_SIZE}GB, have ${DISK_SIZE_GB}GB" >&2
     exit 1
 fi
 
+#=============================================================================
+# SUMMARY
+#=============================================================================
 echo "=== GOSH SLACK INSTALLER ==="
 echo ""
-echo "Auto-detected target: $TARGET_DISK (${DISK_SIZE_GB}GB)"
-echo "Root partition: $(( DISK_SIZE_GB - SWAP_GB ))GB"
+echo "Boot mode:      $BOOT_MODE"
+echo "Target disk:    $TARGET_DISK (${DISK_SIZE_GB}GB)"
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    echo "EFI partition:  512MB"
+    echo "Root partition: $(( DISK_SIZE_GB - SWAP_GB - 1 ))GB"
+else
+    echo "Root partition: $(( DISK_SIZE_GB - SWAP_GB ))GB"
+fi
 echo "Swap partition: ${SWAP_GB}GB (based on ${RAM_GB}GB RAM)"
 echo ""
 echo "This will DESTROY all data on $TARGET_DISK"
@@ -92,12 +149,24 @@ sleep 5
 #=============================================================================
 # PARTITION
 #=============================================================================
-echo ">>> Partitioning $TARGET_DISK..."
+echo ">>> Partitioning $TARGET_DISK ($BOOT_MODE mode)..."
 wipefs -af "$TARGET_DISK"
-parted -s "$TARGET_DISK" mklabel msdos
-parted -s "$TARGET_DISK" mkpart primary ext4 1MiB "-${SWAP_GB}GiB"
-parted -s "$TARGET_DISK" set 1 boot on
-parted -s "$TARGET_DISK" mkpart primary linux-swap "-${SWAP_GB}GiB" 100%
+
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    # GPT with EFI System Partition
+    parted -s "$TARGET_DISK" mklabel gpt
+    parted -s "$TARGET_DISK" mkpart "EFI" fat32 1MiB 513MiB
+    parted -s "$TARGET_DISK" set 1 esp on
+    parted -s "$TARGET_DISK" mkpart "Linux" ext4 513MiB "-${SWAP_GB}GiB"
+    parted -s "$TARGET_DISK" mkpart "Swap" linux-swap "-${SWAP_GB}GiB" 100%
+else
+    # MBR for BIOS
+    parted -s "$TARGET_DISK" mklabel msdos
+    parted -s "$TARGET_DISK" mkpart primary ext4 1MiB "-${SWAP_GB}GiB"
+    parted -s "$TARGET_DISK" set 1 boot on
+    parted -s "$TARGET_DISK" mkpart primary linux-swap "-${SWAP_GB}GiB" 100%
+fi
+
 partprobe "$TARGET_DISK"
 sleep 2
 
@@ -105,6 +174,9 @@ sleep 2
 # FORMAT
 #=============================================================================
 echo ">>> Formatting..."
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    mkfs.fat -F32 "$PART_EFI"
+fi
 mkfs.ext4 -F "$PART_ROOT"
 mkswap "$PART_SWAP"
 swapon "$PART_SWAP"
@@ -115,6 +187,11 @@ swapon "$PART_SWAP"
 echo ">>> Mounting target..."
 mkdir -p "$TARGET"
 mount "$PART_ROOT" "$TARGET"
+
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    mkdir -p "$TARGET/boot/efi"
+    mount "$PART_EFI" "$TARGET/boot/efi"
+fi
 
 #=============================================================================
 # INSTALL PACKAGES
@@ -134,21 +211,37 @@ done
 #=============================================================================
 echo ">>> Configuring system..."
 
-cat > "$TARGET/etc/fstab" <<EOF
+# fstab
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    cat > "$TARGET/etc/fstab" <<EOF
+$PART_ROOT    /            ext4    defaults        1   1
+$PART_EFI     /boot/efi    vfat    defaults        0   2
+$PART_SWAP    swap         swap    defaults        0   0
+devpts        /dev/pts     devpts  gid=5,mode=620  0   0
+proc          /proc        proc    defaults        0   0
+tmpfs         /dev/shm     tmpfs   nosuid,nodev    0   0
+EOF
+else
+    cat > "$TARGET/etc/fstab" <<EOF
 $PART_ROOT    /         ext4    defaults        1   1
 $PART_SWAP    swap      swap    defaults        0   0
 devpts        /dev/pts  devpts  gid=5,mode=620  0   0
 proc          /proc     proc    defaults        0   0
 tmpfs         /dev/shm  tmpfs   nosuid,nodev    0   0
 EOF
+fi
 
+# Hostname
 echo "$HOSTNAME" > "$TARGET/etc/HOSTNAME"
 echo "127.0.0.1   localhost $HOSTNAME" > "$TARGET/etc/hosts"
 
+# Timezone
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$TARGET/etc/localtime"
 
+# Root password
 echo "root:$ROOT_PASS" | chroot "$TARGET" chpasswd
 
+# Network (DHCP)
 cat > "$TARGET/etc/rc.d/rc.inet1.conf" <<EOF
 IPADDR[0]=""
 NETMASK[0]=""
@@ -157,10 +250,51 @@ DHCP_HOSTNAME[0]="$HOSTNAME"
 EOF
 
 #=============================================================================
-# BOOTLOADER (LILO)
+# BOOTLOADER
 #=============================================================================
-echo ">>> Installing LILO..."
-cat > "$TARGET/etc/lilo.conf" <<EOF
+mount --bind /dev "$TARGET/dev"
+mount --bind /proc "$TARGET/proc"
+mount --bind /sys "$TARGET/sys"
+
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    echo ">>> Installing ELILO (UEFI)..."
+    
+    # Install ELILO to EFI partition
+    mkdir -p "$TARGET/boot/efi/EFI/Slackware"
+    cp "$TARGET/usr/share/elilo"/*.efi "$TARGET/boot/efi/EFI/Slackware/" 2>/dev/null || \
+        cp "$TARGET/boot/elilo"*.efi "$TARGET/boot/efi/EFI/Slackware/" 2>/dev/null || true
+    
+    # Find the kernel
+    KERNEL=$(ls "$TARGET/boot/vmlinuz-"* 2>/dev/null | head -1 | xargs basename)
+    if [[ -z "$KERNEL" ]]; then
+        KERNEL="vmlinuz"
+    fi
+    
+    cat > "$TARGET/boot/efi/EFI/Slackware/elilo.conf" <<EOF
+timeout = 50
+default = Linux
+
+image = $KERNEL
+    label = Linux
+    root = $PART_ROOT
+    read-only
+EOF
+
+    # Copy kernel to EFI partition
+    cp "$TARGET/boot/$KERNEL" "$TARGET/boot/efi/EFI/Slackware/"
+    
+    # Register with EFI (if efibootmgr available)
+    if command -v efibootmgr &>/dev/null; then
+        # Get disk and partition number for EFI
+        EFI_DISK="$TARGET_DISK"
+        EFI_PART_NUM=1
+        efibootmgr -c -d "$EFI_DISK" -p "$EFI_PART_NUM" \
+            -l "\\EFI\\Slackware\\elilo.efi" -L "Slackware" 2>/dev/null || true
+    fi
+else
+    echo ">>> Installing LILO (BIOS)..."
+    
+    cat > "$TARGET/etc/lilo.conf" <<EOF
 boot = $TARGET_DISK
 compact
 lba32
@@ -168,15 +302,12 @@ vga = normal
 read-only
 timeout = 50
 image = /boot/vmlinuz
-  root = $PART_ROOT
-  label = Linux
+    root = $PART_ROOT
+    label = Linux
 EOF
 
-mount --bind /dev "$TARGET/dev"
-mount --bind /proc "$TARGET/proc"
-mount --bind /sys "$TARGET/sys"
-
-chroot "$TARGET" /sbin/lilo
+    chroot "$TARGET" /sbin/lilo
+fi
 
 umount "$TARGET/sys"
 umount "$TARGET/proc"
@@ -187,9 +318,14 @@ umount "$TARGET/dev"
 #=============================================================================
 echo ">>> Cleaning up..."
 swapoff "$PART_SWAP"
+if [[ "$BOOT_MODE" == "uefi" ]]; then
+    umount "$TARGET/boot/efi"
+fi
 umount "$TARGET"
 
 echo ""
 echo "=== GOSH SLACK INSTALLER COMPLETE ==="
-echo "Slackware installed to $TARGET_DISK"
+echo "Boot mode:   $BOOT_MODE"
+echo "Installed:   $TARGET_DISK"
+echo ""
 echo "Remove install media and reboot."
