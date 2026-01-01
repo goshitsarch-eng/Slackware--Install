@@ -13,8 +13,8 @@ WORK_DIR="${WORK_DIR:-/tmp/gosh-slack-build}"
 OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)/output}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Slackware mirror (use direct mirror, not the redirector)
-MIRROR="https://slackware.osuosl.org"
+# Slackware mirror
+MIRROR="https://mirrors.slackware.com/slackware/slackware-iso"
 if [[ "$SLACK_ARCH" == "64" ]]; then
     ISO_NAME="slackware64-${SLACK_VERSION}-install-dvd.iso"
     ISO_URL="${MIRROR}/slackware64-${SLACK_VERSION}-iso/${ISO_NAME}"
