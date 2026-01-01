@@ -68,21 +68,109 @@ cp "$SCRIPT_DIR/gosh-slack-installer.sh" "$ISO_WORK/"
 chmod +x "$ISO_WORK/gosh-slack-installer.sh"
 
 #=============================================================================
-# MODIFY INITRD TO AUTO-RUN INSTALLER (optional boot menu entry)
+# MODIFY INITRD TO AUTO-RUN INSTALLER
 #=============================================================================
-echo ">>> Modifying boot configuration..."
+echo ">>> Modifying initrd to auto-run installer..."
+mkdir -p "$INITRD_WORK"
+cd "$INITRD_WORK"
+
+# Extract initrd (it's gzipped cpio)
+gzip -dc "$ISO_WORK/isolinux/initrd.img" | cpio -idm 2>/dev/null
+
+# Copy installer script into initrd
+cp "$SCRIPT_DIR/gosh-slack-installer.sh" "$INITRD_WORK/usr/bin/gosh-slack-installer"
+chmod +x "$INITRD_WORK/usr/bin/gosh-slack-installer"
+
+# Create auto-run hook that checks for gosh_auto kernel parameter
+cat > "$INITRD_WORK/etc/rc.d/rc.gosh" <<'GOSH_HOOK'
+#!/bin/bash
+# Gosh Slack Auto-Installer Hook
+# Checks for gosh_auto kernel parameter and runs installer
+
+if grep -q "gosh_auto" /proc/cmdline; then
+    echo ""
+    echo "=========================================="
+    echo "  GOSH SLACK AUTO-INSTALLER DETECTED"
+    echo "=========================================="
+    echo ""
+
+    # Wait for devices to settle
+    sleep 3
+
+    # Mount the CD-ROM to access packages
+    mkdir -p /mnt/cdrom
+    for dev in /dev/sr0 /dev/cdrom /dev/hdc; do
+        if [[ -b "$dev" ]]; then
+            mount -o ro "$dev" /mnt/cdrom 2>/dev/null && break
+        fi
+    done
+
+    # Check if we found the Slackware source
+    if [[ -d /mnt/cdrom/slackware64 ]]; then
+        export SLACK_SOURCE="/mnt/cdrom/slackware64"
+    elif [[ -d /mnt/cdrom/slackware ]]; then
+        export SLACK_SOURCE="/mnt/cdrom/slackware"
+    else
+        echo "ERROR: Could not find Slackware packages on CD-ROM"
+        exec /bin/bash
+    fi
+
+    # Parse kernel parameters for customization
+    for param in $(cat /proc/cmdline); do
+        case "$param" in
+            gosh_hostname=*) export HOSTNAME="${param#*=}" ;;
+            gosh_timezone=*) export TIMEZONE="${param#*=}" ;;
+            gosh_pass=*)     export ROOT_PASS="${param#*=}" ;;
+            gosh_reboot=*)   export AUTO_REBOOT="${param#*=}" ;;
+        esac
+    done
+
+    # Run the installer
+    /usr/bin/gosh-slack-installer
+
+    # Handle reboot
+    if [[ "$AUTO_REBOOT" == "true" ]]; then
+        echo ">>> Auto-rebooting in 10 seconds..."
+        sleep 10
+        reboot -f
+    else
+        echo ""
+        echo "Installation complete. Remove install media and reboot."
+        echo "Or type 'reboot' to restart now."
+        exec /bin/bash
+    fi
+fi
+GOSH_HOOK
+chmod +x "$INITRD_WORK/etc/rc.d/rc.gosh"
+
+# Hook into rc.S to run our script (add before the shell prompt)
+if [[ -f "$INITRD_WORK/etc/rc.d/rc.S" ]]; then
+    # Add hook near the end of rc.S, before it drops to shell
+    sed -i '/# Start a shell/i \
+# Gosh Slack Auto-Installer hook\n/etc/rc.d/rc.gosh\n' "$INITRD_WORK/etc/rc.d/rc.S"
+fi
+
+# Repack initrd
+echo ">>> Repacking initrd..."
+find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$ISO_WORK/isolinux/initrd.img"
+cd "$WORK_DIR"
+
+#=============================================================================
+# ADD BOOT MENU ENTRIES
+#=============================================================================
+echo ">>> Adding boot menu entries..."
 
 # Add custom boot entry to isolinux
 if [[ -f "$ISO_WORK/isolinux/isolinux.cfg" ]]; then
     cat >> "$ISO_WORK/isolinux/isolinux.cfg" <<'EOF'
 
 LABEL gosh
-  MENU LABEL Gosh Slack Auto-Install
+  MENU LABEL ^Gosh Slack Auto-Install
   KERNEL /kernels/huge.s/bzImage
   APPEND initrd=/isolinux/initrd.img load_ramdisk=1 prompt_ramdisk=0 rw SLACK_KERNEL=huge.s gosh_auto=1
 
-LABEL gosh-custom
-  MENU LABEL Gosh Slack Auto-Install (Custom)
+LABEL gosh-reboot
+  MENU LABEL Gosh Slack Auto-Install (^Auto-Reboot)
   KERNEL /kernels/huge.s/bzImage
   APPEND initrd=/isolinux/initrd.img load_ramdisk=1 prompt_ramdisk=0 rw SLACK_KERNEL=huge.s gosh_auto=1 gosh_reboot=true
 EOF
@@ -97,7 +185,7 @@ menuentry "Gosh Slack Auto-Install" {
     initrd /isolinux/initrd.img
 }
 
-menuentry "Gosh Slack Auto-Install (Custom)" {
+menuentry "Gosh Slack Auto-Install (Auto-Reboot)" {
     linux /kernels/huge.s/bzImage load_ramdisk=1 prompt_ramdisk=0 rw SLACK_KERNEL=huge.s gosh_auto=1 gosh_reboot=true
     initrd /isolinux/initrd.img
 }

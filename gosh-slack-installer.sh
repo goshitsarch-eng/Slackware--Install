@@ -9,10 +9,50 @@ set -euo pipefail
 #=============================================================================
 # CONFIGURATION
 #=============================================================================
-HOSTNAME="slackbox"
-TIMEZONE="US/Pacific"
-ROOT_PASS="changeme"
-SLACK_SOURCE="/mnt/cdrom/slackware64"
+HOSTNAME="${HOSTNAME:-slackbox}"
+TIMEZONE="${TIMEZONE:-US/Pacific}"
+ROOT_PASS="${ROOT_PASS:-changeme}"
+
+#=============================================================================
+# AUTO-DETECT SLACKWARE SOURCE
+#=============================================================================
+detect_slack_source() {
+    local search_paths=(
+        "/mnt/cdrom/slackware64"
+        "/mnt/cdrom/slackware"
+        "/mnt/slackware64"
+        "/mnt/slackware"
+        "/cdrom/slackware64"
+        "/cdrom/slackware"
+    )
+
+    for path in "${search_paths[@]}"; do
+        if [[ -d "$path" ]] && [[ -d "$path/a" ]]; then
+            echo "$path"
+            return 0
+        fi
+    done
+
+    # Try to find it anywhere under common mount points
+    for base in /mnt /cdrom /media; do
+        if [[ -d "$base" ]]; then
+            local found=$(find "$base" -maxdepth 2 -type d -name "slackware64" 2>/dev/null | head -1)
+            if [[ -n "$found" ]] && [[ -d "$found/a" ]]; then
+                echo "$found"
+                return 0
+            fi
+            found=$(find "$base" -maxdepth 2 -type d -name "slackware" 2>/dev/null | head -1)
+            if [[ -n "$found" ]] && [[ -d "$found/a" ]]; then
+                echo "$found"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+SLACK_SOURCE="${SLACK_SOURCE:-$(detect_slack_source || echo "")}"
 
 #=============================================================================
 # BOOT MODE DETECTION
