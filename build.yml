@@ -1,0 +1,127 @@
+name: Build Gosh Slack ISO
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      slack_version:
+        description: 'Slackware version'
+        required: true
+        default: '15.0'
+        type: choice
+        options:
+          - '15.0'
+          - '14.2'
+      slack_arch:
+        description: 'Architecture'
+        required: true
+        default: '64'
+        type: choice
+        options:
+          - '64'
+          - '32'
+
+env:
+  SLACK_VERSION: ${{ inputs.slack_version || '15.0' }}
+  SLACK_ARCH: ${{ inputs.slack_arch || '64' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xorriso \
+            isolinux \
+            syslinux-utils \
+            squashfs-tools \
+            cpio \
+            curl \
+            rsync
+
+      - name: Cache Slackware ISO
+        uses: actions/cache@v4
+        id: cache-iso
+        with:
+          path: /tmp/gosh-slack-build/*.iso
+          key: slackware-${{ env.SLACK_VERSION }}-${{ env.SLACK_ARCH }}-iso
+
+      - name: Build ISO
+        run: |
+          sudo mkdir -p /tmp/gosh-slack-build
+          sudo chmod 777 /tmp/gosh-slack-build
+          
+          # Run build script
+          sudo bash scripts/build-iso.sh
+        env:
+          SLACK_VERSION: ${{ env.SLACK_VERSION }}
+          SLACK_ARCH: ${{ env.SLACK_ARCH }}
+          WORK_DIR: /tmp/gosh-slack-build
+          OUTPUT_DIR: ${{ github.workspace }}/output
+
+      - name: Generate checksums
+        run: |
+          cd output
+          sha256sum *.iso > SHA256SUMS
+          md5sum *.iso > MD5SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosh-slack-${{ env.SLACK_VERSION }}-${{ env.SLACK_ARCH }}
+          path: |
+            output/*.iso
+            output/*SUMS
+          retention-days: 7
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gosh-slack-${{ env.SLACK_VERSION }}-${{ env.SLACK_ARCH }}
+          path: ./release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release/*.iso
+            release/*SUMS
+          body: |
+            ## Gosh Slack Installer ${{ github.ref_name }}
+            
+            Automated Slackware ${{ env.SLACK_VERSION }} installer ISO.
+            
+            ### Boot Options
+            - **Gosh Slack Auto-Install** - Fully automated installation
+            - **Gosh Slack Auto-Install (Custom)** - With auto-reboot
+            
+            ### Kernel Parameters
+            ```
+            gosh_hostname=NAME      Set hostname
+            gosh_timezone=TZ        Set timezone
+            gosh_pass=PASSWORD      Set root password  
+            gosh_reboot=true        Auto-reboot after install
+            ```
+            
+            ### Checksums
+            See `SHA256SUMS` and `MD5SUMS` files.
+          draft: false
+          prerelease: false

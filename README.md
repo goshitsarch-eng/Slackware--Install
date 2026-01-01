@@ -1,71 +1,127 @@
 # Gosh Slack Installer
 
-A dead-simple, fully automated Slackware installer. Boot the install media, run one command, and 20 minutes later you have a working Slackware system.
+Fully automated Slackware Linux installer. Boot the ISO, walk away, come back to a working system.
 
 ## Features
 
-- **Fully automatic** — auto-detects target disk, calculates partition sizes
-- **No prompts** — just a 5-second abort window
-- **Smart partitioning** — swap sized to RAM (1-8GB cap), root gets the rest
-- **Full install** — all package series included
-- **DHCP networking** — ready to connect on first boot
+- **Zero interaction** - No prompts, no questions
+- **Auto-detection** - Finds the right disk, avoids install media
+- **BIOS & UEFI** - Works on both legacy and modern systems
+- **NVMe support** - Handles all disk naming schemes
+- **Configurable** - Override defaults via kernel parameters
 
-## Requirements
+## Quick Start
 
-- Slackware 15.0+ install media (USB/DVD)
-- Target system with at least 8GB disk
-- BIOS/MBR boot (not UEFI)
+1. Download the latest ISO from [Releases](../../releases)
+2. Write to USB: `dd if=gosh-slack-*.iso of=/dev/sdX bs=4M status=progress`
+3. Boot the target machine from USB
+4. Select **"Gosh Slack Auto-Install"** from the boot menu
+5. Wait ~15-30 minutes
+6. Remove USB and reboot
 
-## Usage
+## Boot Menu Options
 
-### One-liner from GitHub
+| Option | Description |
+|--------|-------------|
+| Gosh Slack Auto-Install | Standard install, manual reboot |
+| Gosh Slack Auto-Install (Custom) | Install + automatic reboot |
 
-Boot the Slackware install media, then:
+## Kernel Parameters
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/goshitsarch-eng/gosh-slack-installer/main/gosh-slack-installer.sh | bash
+Customize the install by editing the boot command (press Tab at boot menu):
+
+```
+gosh_auto gosh_hostname=mybox gosh_timezone=America/New_York gosh_pass=secret123
 ```
 
-Or if you want to inspect before running:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `gosh_hostname=` | `slackbox` | System hostname |
+| `gosh_timezone=` | `US/Pacific` | Timezone (from `/usr/share/zoneinfo`) |
+| `gosh_pass=` | `changeme` | Root password |
+| `gosh_reboot=` | `false` | Auto-reboot when done (`true`/`false`) |
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/goshitsarch-eng/gosh-slack-installer/main/gosh-slack-installer.sh
-less gosh-slack-installer.sh
-bash gosh-slack-installer.sh
+## What Gets Installed
+
+- Full Slackware installation (all package series: A, AP, D, E, F, K, KDE, L, N, T, TCL, X, XAP, XFCE, Y)
+- DHCP networking enabled
+- LILO (BIOS) or ELILO (UEFI) bootloader
+
+## Disk Selection Logic
+
+The installer automatically selects a target disk:
+
+1. Finds all non-removable disks
+2. Excludes the disk containing the install media
+3. Selects the largest remaining disk
+4. **⚠️ DESTROYS ALL DATA on selected disk**
+
+## Partition Layout
+
+**BIOS Systems (MBR):**
+```
+├─ Partition 1: / (ext4, bootable) - all space minus swap
+└─ Partition 2: swap              - matches RAM (1-8GB cap)
 ```
 
-### From local copy
-
-```bash
-chmod +x gosh-slack-installer.sh
-./gosh-slack-installer.sh
+**UEFI Systems (GPT):**
+```
+├─ Partition 1: /boot/efi (FAT32) - 512MB
+├─ Partition 2: / (ext4)          - all space minus swap/EFI
+└─ Partition 3: swap              - matches RAM (1-8GB cap)
 ```
 
-## Configuration
+## Building Locally
 
-Edit the top of the script to change defaults:
+Requirements: Linux with `xorriso`, `cpio`, `squashfs-tools`, `curl`, `rsync`
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOSTNAME` | `slackbox` | System hostname |
-| `TIMEZONE` | `US/Pacific` | Timezone |
-| `ROOT_PASS` | `changeme` | Root password |
-| `SLACK_SOURCE` | `/mnt/cdrom/slackware64` | Path to package source |
+```bash
+git clone https://github.com/YOUR_USERNAME/gosh-slack-installer
+cd gosh-slack-installer
+sudo ./scripts/build-iso.sh
+```
 
-## What it does
+Output: `output/gosh-slack-15.0-64.iso`
 
-1. Auto-detects the largest non-removable disk (excludes install media)
-2. Wipes and partitions the disk (root + swap)
-3. Formats partitions (ext4 + swap)
-4. Installs all Slackware packages
-5. Configures fstab, hostname, timezone, networking (DHCP)
-6. Sets root password
-7. Installs LILO bootloader
-8. Cleans up and prompts for reboot
+### Build Options
 
-## After install
+```bash
+SLACK_VERSION=14.2 SLACK_ARCH=32 sudo -E ./scripts/build-iso.sh
+```
 
-Default root password is `changeme` — change it on first login.
+## GitHub Actions
+
+The repository includes automated builds:
+
+- **Push to main**: Builds ISO, uploads as artifact
+- **Tag with `v*`**: Creates GitHub Release with ISO
+
+### Manual Trigger
+
+Go to Actions → Build Gosh Slack ISO → Run workflow → Select version/arch
+
+## Safety
+
+- 5-second countdown before disk operations
+- Excludes removable media from target selection
+- Excludes the boot/install media from targets
+- Clear boot menu warnings
+
+**However**: This tool is designed to wipe disks automatically. Use with caution. Test in VMs first.
+
+## Testing with QEMU
+
+```bash
+# Create test disk
+qemu-img create -f qcow2 test-disk.qcow2 20G
+
+# Boot ISO (BIOS)
+qemu-system-x86_64 -m 2G -hda test-disk.qcow2 -cdrom gosh-slack-15.0-64.iso -boot d
+
+# Boot ISO (UEFI) - requires OVMF
+qemu-system-x86_64 -m 2G -hda test-disk.qcow2 -cdrom gosh-slack-15.0-64.iso \
+    -bios /usr/share/OVMF/OVMF_CODE.fd -boot d
+```
 
 ## License
 
@@ -73,4 +129,4 @@ AGPL-3.0-or-later
 
 ## Contributing
 
-Issues and PRs welcome.
+Issues and PRs welcome. Please test changes in a VM before submitting.
